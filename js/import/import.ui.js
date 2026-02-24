@@ -34,6 +34,12 @@ import {
   updateBulkResults,
   clearBulkResults, setupBulkUI,
 } from './import.bulk.js';
+import {
+  addImportedPage,
+  clearImportedPages,
+  setupPageNavigation,
+  showFirstPage,
+} from './import.allpages.js';
 import ImportStatus from './import.result.js';
 import {
   getContentFrame,
@@ -88,6 +94,11 @@ const postSuccessfulStep = async (results, originalURL) => {
       url: originalURL,
       path,
     };
+
+    // Add page to all pages view
+    addImportedPage({
+      docx, html, md, jcr, filename, path, report, from,
+    });
 
     if (isSaveLocal && dirHandle && (docx || html || md || jcr)) {
       const files = [];
@@ -241,6 +252,14 @@ const createImporter = () => {
 };
 
 const startImport = async () => {
+  // Force reload of transformation script before each import
+  const currentImportFileURL = config.fields['import-file-url'];
+  if (currentImportFileURL) {
+    await config.importer.setImportFileURL(currentImportFileURL);
+    // eslint-disable-next-line no-console
+    console.log('Transformation script reloaded');
+  }
+
   const field = IS_BULK ? 'import-urls' : 'import-url';
 
   // before we start clean up the url list and remove any slashes at the end
@@ -372,6 +391,7 @@ const startImport = async () => {
 
   if (IS_BULK) {
     clearBulkResults();
+    clearImportedPages();
     if (config.fields['import-show-preview']) {
       PREVIEW_CONTAINER.classList.remove('hidden');
     } else {
@@ -427,6 +447,8 @@ const attachListeners = () => {
       }, originalURL);
     } else if (!IS_BULK) {
       alert.success('Import completed');
+      // Show first page after successful import
+      showFirstPage();
     }
   });
 
@@ -509,6 +531,7 @@ const init = async () => {
     setupBulkUI(project);
   }
 
+  setupPageNavigation();
   attachListeners();
 };
 

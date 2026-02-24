@@ -7,6 +7,7 @@
     <title>Import - Workbench Tool</title>
     <link rel="stylesheet" href="./css/styles.css" />
     <link rel="stylesheet" href="./css/import/import.css" />
+    <link rel="stylesheet" href="./css/import/import-pages.css" />
 
     <script type="importmap">
         {
@@ -162,6 +163,24 @@
                         </div>
                     </div>
                     <div class="section-col">
+                        <div id="import-pages-navigation" class="hidden">
+                            <sp-divider size="s"></sp-divider>
+                            <div class="pages-nav-controls">
+                                <sp-button id="import-prev-page" size="m" quiet>
+                                    <sp-icon-chevron-left slot="icon"></sp-icon-chevron-left>
+                                    Previous
+                                </sp-button>
+                                <div id="import-page-info">
+                                    <span id="import-current-page-number">1</span> / <span id="import-total-pages">1</span>
+                                    <div id="import-current-page-title"></div>
+                                </div>
+                                <sp-button id="import-next-page" size="m" quiet>
+                                    Next
+                                    <sp-icon-chevron-right slot="icon"></sp-icon-chevron-right>
+                                </sp-button>
+                            </div>
+                            <sp-divider size="s"></sp-divider>
+                        </div>
                         <sp-tabs selected="import-preview">
                             <sp-tab label="Preview" value="import-preview"></sp-tab>
                             <sp-tab label="Markdown" value="import-markdown"></sp-tab>

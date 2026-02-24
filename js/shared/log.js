@@ -10,6 +10,7 @@
  * governing permissions and limitations under the License.
  */
 /* eslint-disable no-underscore-dangle, no-console */
+/*
 {
   const patchArgs = (args) => {
     if (typeof args[0] === 'string') {
@@ -35,3 +36,4 @@
     _error(...args);
   };
 }
+*/
