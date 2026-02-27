@@ -55,6 +55,7 @@ const CONFIG_PARENT_SELECTOR = `${PARENT_SELECTOR} form`;
 const PREVIEW_CONTAINER = document.querySelector(`${PARENT_SELECTOR} .page-preview`);
 const IMPORT_FILE_URL_FIELD = document.getElementById('import-file-url');
 const IMPORT_BUTTON = document.getElementById('import-doimport-button');
+const REIMPORT_BUTTON = document.getElementById('import-reimport-button');
 const DEFAULT_TRANSFORMER_USED = document.getElementById('transformation-file-default');
 const JCR_ASSET_FOLDER = document.getElementById('jcr-asset-folder');
 const JCR_SITE_FOLDER = document.getElementById('jcr-site-folder');
@@ -68,6 +69,7 @@ let isSaveLocal = false;
 let dirHandle = null;
 let jcrPages = [];
 let pageAssets = new Set();
+let lastCachedPage = null; // { html, originalURL, replacedURL, url }
 
 const updateImporterUI = (results, originalURL, error) => {
   if (!IS_BULK) {
@@ -79,10 +81,12 @@ const updateImporterUI = (results, originalURL, error) => {
 
 const disableProcessButtons = () => {
   IMPORT_BUTTON.disabled = true;
+  REIMPORT_BUTTON.disabled = true;
 };
 
 const enableProcessButtons = () => {
   IMPORT_BUTTON.disabled = false;
+  REIMPORT_BUTTON.disabled = !!(!lastCachedPage);
 };
 
 const postSuccessfulStep = async (results, originalURL) => {
@@ -252,12 +256,12 @@ const createImporter = () => {
 };
 
 const startImport = async () => {
-  // Force reload of transformation script before each import
+  // Force reload of transformation script and all its dependencies before each import
   const currentImportFileURL = config.fields['import-file-url'];
   if (currentImportFileURL) {
-    await config.importer.setImportFileURL(currentImportFileURL);
+    await config.importer.setImportFileURL(currentImportFileURL, true);
     // eslint-disable-next-line no-console
-    console.log('Transformation script reloaded');
+    console.log('Transformation script and dependencies reloaded');
   }
 
   const field = IS_BULK ? 'import-urls' : 'import-url';
@@ -324,6 +328,13 @@ const startImport = async () => {
       }
 
       if (res.document) {
+        // Cache page metadata (the iframe document stays live and intact)
+        lastCachedPage = {
+          originalURL: res.originalURL,
+          replacedURL: res.replacedURL,
+          url,
+        };
+
         const includeDocx = !!dirHandle && config.fields['import-local-docx'];
 
         const { document, replacedURL, originalURL } = res;
@@ -494,6 +505,95 @@ const attachListeners = () => {
     jcrPages = [];
     pageAssets = new Set();
     await startImport();
+  });
+
+  REIMPORT_BUTTON.addEventListener('click', async () => {
+    if (!lastCachedPage) {
+      // No cached page, fall back to normal import
+      jcrPages = [];
+      pageAssets = new Set();
+      await startImport();
+      return;
+    }
+
+    const wasPollEnabled = config.importer.poll;
+    config.importer.poll = false;
+    if (config.importer.projectTransformInterval) {
+      clearInterval(config.importer.projectTransformInterval);
+      config.importer.projectTransformInterval = null;
+    }
+
+    // Force reload of transformation script before re-import
+    const currentImportFileURL = config.fields['import-file-url'];
+    if (currentImportFileURL) {
+      await config.importer.setImportFileURL(currentImportFileURL, true);
+    }
+
+    await new Promise((r) => { setTimeout(r, 0); });
+
+    setDefaultTransformerNotice(config.importer);
+    PREVIEW_CONTAINER.classList.remove('hidden');
+    clearImportedPages();
+    clearBulkResults();
+    disableProcessButtons();
+    toggleLoadingButton(REIMPORT_BUTTON);
+
+    try {
+      const frame = getContentFrame();
+      const liveDoc = frame.contentDocument;
+      const html = `<!DOCTYPE html>\n${liveDoc.documentElement.outerHTML}`;
+      const freshDoc = new DOMParser().parseFromString(html, 'text/html');
+
+      const { replacedURL, originalURL } = lastCachedPage;
+
+      const onLoadSucceeded = await config.importer.onLoad({
+        url: replacedURL,
+        document: freshDoc,
+        params: { originalURL },
+      });
+
+      if (onLoadSucceeded) {
+        let customHeaders = {};
+        try {
+          if (hasText(config.fields['import-custom-headers'])) {
+            customHeaders = JSON.parse(config.fields['import-custom-headers']);
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error(`Unable to parse ${config.fields['import-custom-headers']}`);
+        }
+
+        const projectType = await project.getType();
+        const includeDocx = !!dirHandle && config.fields['import-local-docx'];
+
+        let params = { originalURL, customHeaders };
+        if (projectType === 'xwalk') {
+          params = {
+            ...params,
+            sitePath: project.getSitePath(),
+            assetPath: project.getAssetPath(),
+          };
+        }
+
+        config.importer.setTransformationInput({
+          url: replacedURL,
+          document: freshDoc,
+          includeDocx,
+          params,
+          projectType,
+        });
+        await config.importer.transform();
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('Re-import failed:', e);
+      alert.error('Re-import failed', e.message);
+    }
+
+    config.importer.poll = wasPollEnabled;
+
+    toggleLoadingButton(REIMPORT_BUTTON);
+    enableProcessButtons();
   });
 
   IMPORT_FILE_URL_FIELD.addEventListener('change', async (event) => {

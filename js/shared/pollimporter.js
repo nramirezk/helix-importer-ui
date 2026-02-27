@@ -18,8 +18,12 @@ const DEFAULT_SUPPORTED_STYLES = [{ name: 'background-image', exclude: /none/g }
 function deepCloneWithStyles(document, styles = DEFAULT_SUPPORTED_STYLES) {
   const clone = document.cloneNode(true);
 
+  if (!document.defaultView) {
+    return clone;
+  }
+
   const applyStyles = (nodeSrc, nodeDest) => {
-    const style = window.getComputedStyle(nodeSrc, null);
+    const style = document.defaultView.getComputedStyle(nodeSrc, null);
 
     styles.forEach((s) => {
       if (style[s.name]) {
@@ -61,7 +65,7 @@ export default class PollImporter {
     this.#init();
   }
 
-  async #loadProjectTransform() {
+  async #loadProjectTransform(forceReload = false) {
     /** Helper function to reset the importer to its default state */
     const reset = () => {
       this.usingDefaultTransformer = true;
@@ -71,17 +75,109 @@ export default class PollImporter {
     };
 
     const $this = this;
+
+    /**
+     * Recursively fetch a module and all its relative dependencies (with cache bust),
+     * collecting their source texts into a map. Used to detect dependency changes
+     * without creating blob URLs.
+     */
+    const fetchAllSources = async (moduleUrl, visited = new Set()) => {
+      if (visited.has(moduleUrl)) return {};
+      visited.add(moduleUrl);
+
+      const timestamp = Date.now();
+      const fetchUrl = `${moduleUrl}${moduleUrl.includes('?') ? '&' : '?'}cf=${timestamp}`;
+      const response = await fetch(fetchUrl, { cache: 'no-store' });
+      if (!response.ok) return {};
+      const source = await response.text();
+
+      const sources = { [moduleUrl]: source };
+
+      const basePath = moduleUrl.substring(0, moduleUrl.lastIndexOf('/') + 1);
+      const importRegex = /((?:import|export)\s+(?:[^'"]*?\s+)?from\s+['"])(\.\.?\/[^'"]+)(['"])/g;
+      const matches = [...source.matchAll(importRegex)];
+
+      for (const match of matches) {
+        const relPath = match[2];
+        const absoluteUrl = new URL(relPath, basePath).href;
+        // eslint-disable-next-line no-await-in-loop
+        const depSources = await fetchAllSources(absoluteUrl, visited);
+        Object.assign(sources, depSources);
+      }
+
+      return sources;
+    };
+
+    /**
+     * Recursively fetch a module and all its relative dependencies,
+     * rewriting import paths to use blob URLs with cache busters.
+     * This ensures that ALL dependency changes are picked up without a page reload.
+     */
+    const fetchModuleTree = async (moduleUrl, visited = new Map()) => {
+      // Avoid circular dependencies
+      if (visited.has(moduleUrl)) return visited.get(moduleUrl);
+
+      // Reserve the slot to handle circular refs
+      visited.set(moduleUrl, null);
+
+      const timestamp = Date.now();
+      const fetchUrl = `${moduleUrl}${moduleUrl.includes('?') ? '&' : '?'}cf=${timestamp}`;
+      const response = await fetch(fetchUrl, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Failed to fetch ${moduleUrl}: ${response.statusText}`);
+      let source = await response.text();
+
+      // Determine base path for resolving relative imports
+      const basePath = moduleUrl.substring(0, moduleUrl.lastIndexOf('/') + 1);
+
+      // Find all relative import/export from statements
+      const importRegex = /((?:import|export)\s+(?:[^'"]*?\s+)?from\s+['"])(\.\.?\/[^'"]+)(['"])/g;
+      const matches = [...source.matchAll(importRegex)];
+
+      // Process each relative import and replace with blob URL
+      for (const match of matches) {
+        const relPath = match[2];
+        const absoluteUrl = new URL(relPath, basePath).href;
+
+        // eslint-disable-next-line no-await-in-loop
+        const depBlobUrl = await fetchModuleTree(absoluteUrl, visited);
+        if (depBlobUrl) {
+          source = source.replace(match[0], `${match[1]}${depBlobUrl}${match[3]}`);
+        }
+      }
+
+      // Add sourceURL directive so browser DevTools shows the original filename
+      const fileName = moduleUrl.split('/').pop().split('?')[0];
+      source += `\n//# sourceURL=importer://${fileName}`;
+
+      const blob = new Blob([source], { type: 'application/javascript' });
+      const blobUrl = URL.createObjectURL(blob);
+      visited.set(moduleUrl, blobUrl);
+      return blobUrl;
+    };
+
     const loadModule = async (projectTransformFileURL) => {
-      // if we can load the module, we get the default export and assign it to the projectTransform
       try {
-        const mod = await import(projectTransformFileURL);
+        // Resolve the full URL for the module
+        const fullUrl = new URL(projectTransformFileURL, window.location.origin).href;
+
+        // Recursively fetch and rewrite all modules in the dependency tree
+        const blobUrl = await fetchModuleTree(fullUrl);
+        const mod = await import(blobUrl);
+
         if (mod.default) {
           $this.projectTransform = mod.default;
+          // eslint-disable-next-line no-console
+          console.log('Module loaded successfully, transform updated');
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn('Module loaded but has no default export:', projectTransformFileURL);
         }
         this.hasModuleErrors = false;
         this.notifyModuleSuccessLoad();
         return true;
       } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('Module load failed:', err);
         this.hasModuleErrors = true;
         this.notifyModuleLoadError(err);
         return false;
@@ -102,7 +198,7 @@ export default class PollImporter {
     const urlToLoad = `${this.config.importFileURL}?cf=${new Date().getTime()}`;
     let body = '';
     try {
-      const response = await fetch(urlToLoad);
+      const response = await fetch(urlToLoad, { cache: 'no-store' });
 
       // if we couldn't load the resource then we reset the importer
       if (!response.ok) {
@@ -116,18 +212,46 @@ export default class PollImporter {
       body = await response.text();
 
       // check to see if the last time we loaded the resource is at all different
-      if (body !== this.lastProjectTransformFileBody) {
+      // or if we are forcing a reload (e.g., to pick up dependency changes)
+      if (forceReload || body !== this.lastProjectTransformFileBody) {
         this.lastProjectTransformFileBody = body;
 
         // now load the module and obtain the default export
-        const success = await loadModule(urlToLoad);
+        // loadModule uses blob URLs with cache busters for all dependencies
+        const success = await loadModule(this.config.importFileURL);
+        if (!success) {
+          return false;
+        }
+
+        // Snapshot all dependency sources for future comparisons
+        const fullUrl = new URL(this.config.importFileURL, window.location.origin).href;
+        this.lastDependencySources = await fetchAllSources(fullUrl);
+
+        this.projectTransformFileURL = urlToLoad;
+        // eslint-disable-next-line no-console
+        console.log(`Loaded importer file${forceReload ? ' (forced)' : ''}: ${this.config.importFileURL}`);
+        return true;
+      }
+
+      // Main file unchanged — check if any dependency has changed
+      const fullUrl = new URL(this.config.importFileURL, window.location.origin).href;
+      const currentSources = await fetchAllSources(fullUrl);
+      const prevSources = this.lastDependencySources || {};
+      const depsChanged = Object.entries(currentSources).some(
+        ([url, source]) => prevSources[url] !== source,
+      );
+
+      if (depsChanged) {
+        this.lastDependencySources = currentSources;
+
+        const success = await loadModule(this.config.importFileURL);
         if (!success) {
           return false;
         }
 
         this.projectTransformFileURL = urlToLoad;
         // eslint-disable-next-line no-console
-        console.log(`Loaded importer file: ${urlToLoad}`);
+        console.log(`Loaded importer file (dependency changed): ${this.config.importFileURL}`);
         return true;
       }
     } catch (err) {
@@ -303,9 +427,9 @@ export default class PollImporter {
     };
   }
 
-  async setImportFileURL(importFileURL) {
+  async setImportFileURL(importFileURL, forceReload = false) {
     this.config.importFileURL = importFileURL;
-    await this.#loadProjectTransform();
+    await this.#loadProjectTransform(forceReload);
   }
 
   addListener(listener) {
