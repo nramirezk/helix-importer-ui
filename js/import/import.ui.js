@@ -81,12 +81,12 @@ const updateImporterUI = (results, originalURL, error) => {
 
 const disableProcessButtons = () => {
   IMPORT_BUTTON.disabled = true;
-  REIMPORT_BUTTON.disabled = true;
+  if (REIMPORT_BUTTON) REIMPORT_BUTTON.disabled = true;
 };
 
 const enableProcessButtons = () => {
   IMPORT_BUTTON.disabled = false;
-  REIMPORT_BUTTON.disabled = !!(!lastCachedPage);
+  if (REIMPORT_BUTTON) REIMPORT_BUTTON.disabled = !!(!lastCachedPage);
 };
 
 const postSuccessfulStep = async (results, originalURL) => {
