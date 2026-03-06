@@ -410,6 +410,7 @@ const startImport = async () => {
     }
     toggleReportButton(false);
   } else {
+    clearImportedPages();
     toggleReportButton(false);
     PREVIEW_CONTAINER.classList.remove('hidden');
   }
